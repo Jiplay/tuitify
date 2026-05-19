@@ -18,6 +18,7 @@ from rich.text import Text
 from src.youtube.radio import RadioEngine
 from src.search.searcher import YoutubeSearcher
 from src.youtube.player import YTStreamVLC
+from src.youtube.utils import track_signature
 
 from .keybindings import BINDINGS
 
@@ -108,10 +109,13 @@ class Tuitify(App):
         if not self.current_track:
             return
 
+        self.radio.mark_played(self.current_track)
         next_track = self._pop_recommendation()
         if not next_track:
-            self.notify("No next recommendation ready.", severity="warning")
-            return
+            next_track = self.radio.next_track(seed=self.current_track)
+            if not next_track:
+                self.notify("No next recommendation ready.", severity="warning")
+                return
 
         self.start_playback(next_track)
 
@@ -321,6 +325,8 @@ class Tuitify(App):
             results_view.index = 0
 
     def start_playback(self, track: dict[str, Any]) -> None:
+        if self.current_track and track_signature(self.current_track) != track_signature(track):
+            self.radio.mark_played(self.current_track)
         self.playback_nonce += 1
         nonce = self.playback_nonce
         self.player.stop()
@@ -381,7 +387,6 @@ class Tuitify(App):
             self._load_artwork(str(thumbnail_url))
         else:
             self._set_artwork(None)
-        self._update_next_up_ui()
 
     @work(exclusive=True, thread=True, group="artwork")
     def _load_artwork(self, image_url: str) -> None:
@@ -398,10 +403,9 @@ class Tuitify(App):
         self.query_one("#album-art", Image).image = image_data
 
     def _seed_recommendations(self, seed_track: dict[str, Any], limit: int = 10) -> None:
-        candidates = self.radio.fetch_next_from_seed(seed_track)
         seeded: list[dict[str, Any]] = []
 
-        for candidate in candidates:
+        for candidate in self.radio.build_queue(seed_track, limit=limit * 2):
             if len(seeded) >= limit:
                 break
 
@@ -428,6 +432,7 @@ class Tuitify(App):
             seeded.append(candidate)
 
         self.recommendation_queue = seeded
+        self.radio.queue = list(seeded)
         self.recommendation_urls = [str(track.get("url", "")) for track in seeded]
         self.call_from_thread(self._update_next_up_ui)
 

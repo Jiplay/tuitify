@@ -24,14 +24,24 @@ def normalize_title(title: str) -> str:
     normalized = title.lower()
     normalized = re.sub(r"\(.*?\)", "", normalized)
     normalized = re.sub(r"\[.*?\]", "", normalized)
+    normalized = re.sub(r"\b(feat|ft)\.?\s+[a-z0-9 ,&]+\b", "", normalized)
 
     junk_words = (
+        "official music video",
         "official video",
+        "visualizer",
+        "performance video",
         "lyrics",
         "lyric video",
         "audio",
+        "explicit",
+        "clean",
+        "remastered",
+        "remaster",
+        "version",
         "hd",
         "4k",
+        "mv",
         "video",
     )
     for word in junk_words:
@@ -56,7 +66,7 @@ def track_signature(track: dict[str, Any]) -> str:
 
 
 def is_real_song(track: dict[str, Any]) -> bool:
-    title = str(track.get("title", "")).lower()
+    title = normalize_title(str(track.get("title", "")))
     banned_keywords = (
         "mix",
         "playlist",
@@ -81,6 +91,10 @@ def is_real_song(track: dict[str, Any]) -> bool:
         "trailer",
         "speech",
         "debate",
+        "sped up",
+        "slowed",
+        "reverb",
+        "nightcore",
     )
 
     if any(keyword in title for keyword in banned_keywords):
