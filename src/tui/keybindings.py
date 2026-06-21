@@ -12,4 +12,6 @@ BINDINGS = [
         Binding("right", "seek_forward", "→ Forward 10s", show=True),
         Binding("up", "cursor_up", "Cursor Up", show=True),
         Binding("down", "cursor_down", "Cursor Down", show=True),
+        Binding("plus", "volume_up", "Volume +", show=True),
+        Binding("minus", "volume_down", "Volume -", show=True),
     ]

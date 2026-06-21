@@ -45,6 +45,8 @@ class Tuitify(App):
         self.search_in_progress = False
         self.search_cache: dict[str, list[dict[str, Any]]] = {}
         self.theme_names: list[str] = []
+        self.prefetched_track: dict[str, Any] | None = None
+        self.prefetched_stream_url: str | None = None
 
 
     def compose(self):
@@ -131,6 +133,18 @@ class Tuitify(App):
 
     def action_focus_input(self) -> None:
         self.query_one("#search-input", Input).focus()
+
+    def action_volume_up(self) -> None:
+        current_volume = self.player.get_volume()
+        new_volume = self.player.set_volume(current_volume + 5)
+        self.notify(f"Volume: {new_volume}%", severity="information")
+        self._refresh_player_progress()
+
+    def action_volume_down(self) -> None:
+        current_volume = self.player.get_volume()
+        new_volume = self.player.set_volume(current_volume - 5)
+        self.notify(f"Volume: {new_volume}%", severity="information")
+        self._refresh_player_progress()
 
     def action_cycle_theme(self) -> None:
         if not self.theme_names:
@@ -340,8 +354,22 @@ class Tuitify(App):
             self.call_from_thread(self._set_current_track, current_track)
             self._seed_recommendations(current_track, limit=10)
 
+            # Check if this track was already prefetched
+            prefetched_url = None
+            if self.prefetched_track and track_signature(self.prefetched_track) == track_signature(current_track):
+                prefetched_url = self.prefetched_stream_url
+
+            # Reset prefetch buffers
+            self.prefetched_track = None
+            self.prefetched_stream_url = None
+
             try:
-                end_state = self.player.play_track(current_track, retry_on_error=True)
+                end_state = self.player.play_track(
+                    current_track,
+                    retry_on_error=True,
+                    prefetched_stream_url=prefetched_url,
+                    on_near_end=lambda: self.call_from_thread(self._start_prefetch_next_track),
+                )
             except Exception as error:
                 next_track = self._pop_recommendation()
                 if not next_track:
@@ -380,7 +408,8 @@ class Tuitify(App):
             if not track.get("duration")
             else str(track.get("total_play_time") or "0:00")
         )
-        self.query_one("#time", Static).update(f"0:00 / {total_time}")
+        vol = self.player.get_volume()
+        self.query_one("#time", Static).update(f"0:00 / {total_time}  |  Vol: {vol}%")
 
         thumbnail_url = track.get("thumbnail")
         if thumbnail_url:
@@ -401,6 +430,39 @@ class Tuitify(App):
 
     def _set_artwork(self, image_data: io.BytesIO | None) -> None:
         self.query_one("#album-art", Image).image = image_data
+
+    @work(exclusive=True, thread=True, group="prefetch")
+    def _start_prefetch_next_track(self) -> None:
+        # Determine the next track that would be played
+        next_track = None
+        if self.recommendation_queue:
+            next_track = self.recommendation_queue[0]
+        else:
+            # Seed from current track if we don't have recommendations yet
+            if self.current_track:
+                next_track = self.radio.next_track(seed=self.current_track)
+
+        if not next_track:
+            return
+
+        # Fetch the stream URL
+        video_url = next_track.get("url")
+        if not video_url:
+            video_id = next_track.get("id")
+            if video_id:
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                next_track["url"] = video_url
+
+        if not video_url:
+            return
+
+        try:
+            stream_url, _ = self.player.service.get_stream_info(video_url)
+            self.prefetched_track = next_track
+            self.prefetched_stream_url = stream_url
+        except Exception:
+            self.prefetched_track = None
+            self.prefetched_stream_url = None
 
     def _seed_recommendations(self, seed_track: dict[str, Any], limit: int = 10) -> None:
         seeded: list[dict[str, Any]] = []
@@ -466,11 +528,12 @@ class Tuitify(App):
         if duration_ms <= 0:
             return
 
+        vol = self.player.get_volume()
         self.query_one("#progress", ProgressBar).update(
             total=duration_ms, progress=min(elapsed_ms, duration_ms)
         )
         self.query_one("#time", Static).update(
-            f"{self._format_ms(elapsed_ms)} / {self._format_ms(duration_ms)}"
+            f"{self._format_ms(elapsed_ms)} / {self._format_ms(duration_ms)}  |  Vol: {vol}%"
         )
 
     def _seek_relative_ms(self, delta_ms: int) -> None:

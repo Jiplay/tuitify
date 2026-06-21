@@ -27,6 +27,7 @@ class YTStreamVLC:
             "--no-media-library",
         )
         self.player = self.instance.media_player_new()
+        self.player.audio_set_volume(80)
 
     def play_track(
         self,
@@ -121,3 +122,11 @@ class YTStreamVLC:
 
     def total_length_ms(self) -> int:
         return max(self.player.get_length(), 0)
+
+    def get_volume(self) -> int:
+        return self.player.audio_get_volume()
+
+    def set_volume(self, volume: int) -> int:
+        volume = max(0, min(volume, 100))
+        self.player.audio_set_volume(volume)
+        return volume
