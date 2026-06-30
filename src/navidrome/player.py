@@ -6,18 +6,18 @@ from typing import Any
 
 import vlc
 
-from .service import YouTubeService
+from .client import NavidromeClient
 
 
-class YTStreamVLC:
-    """Small VLC wrapper that plays one YouTube track to completion."""
+class NavidromeStreamVLC:
+    """Small VLC wrapper that plays one Navidrome track to completion."""
 
     def __init__(
         self,
-        service: YouTubeService | None = None,
+        client: NavidromeClient,
         poll_interval: float = 1.0,
     ):
-        self.service = service or YouTubeService()
+        self.service = client
         self.poll_interval = poll_interval
         self.instance = vlc.Instance(
             "--no-video",

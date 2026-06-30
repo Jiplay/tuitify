@@ -1,7 +1,7 @@
 [project]
 name = "tuitify"
 version = "0.1.0"
-description = "Add your description here"
+description = "Terminal-first Navidrome music client with smart autoplay radio."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,5 +10,4 @@ dependencies = [
     "requests>=2.33.1",
     "textual>=8.2.4",
     "textual-image>=0.12.0",
-    "yt-dlp>=2026.3.17",
 ]

@@ -26,6 +26,23 @@ Screen {
         width: 3fr;
     }
 
+    /* Compact "player only" view: hide search panel and window chrome. */
+    .player-only #search-panel {
+        display: none;
+    }
+
+    .player-only #player-panel {
+        width: 1fr;
+    }
+
+    .player-only Header {
+        display: none;
+    }
+
+    .player-only Footer {
+        display: none;
+    }
+
     .search-result-view{
         margin-top: 1;
         border: round #56B6C6;
@@ -55,13 +72,49 @@ Screen {
         width: 100%;
     }
 
-    #media-select {
-        width: 14;
-        margin-right: 1;
-    }
-
     #search-input {
         width: 1fr;
+    }
+
+    ConfigScreen {
+        align: center middle;
+    }
+
+    #config-dialog {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: round #56B6C6;
+        background: #1b1e24;
+    }
+
+    #config-title {
+        text-style: bold;
+        color: #56B6C6;
+        margin-bottom: 1;
+    }
+
+    #config-dialog Input {
+        margin-bottom: 1;
+    }
+
+    #config-status {
+        height: auto;
+        color: #98C379;
+        margin-bottom: 1;
+    }
+
+    #config-status.error {
+        color: #e06c75;
+    }
+
+    #config-buttons {
+        height: auto;
+        align-horizontal: right;
+    }
+
+    #config-buttons Button {
+        margin-left: 2;
     }
 
     .art-frame {
@@ -76,6 +129,22 @@ Screen {
     #album-art {
         width: auto;
         height: 100%;
+    }
+
+    #like {
+        color: #6b7280;
+        height: 1;
+    }
+
+    #like.liked {
+        color: #e06c75;
+        text-style: bold;
+    }
+
+    #loop {
+        height: 1;
+        color: #98C379;
+        text-style: bold;
     }
 
     #next-up {

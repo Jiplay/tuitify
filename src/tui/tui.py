@@ -11,15 +11,18 @@ from textual import work
 from textual.widgets import ListItem
 from textual.app import App
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll, HorizontalScroll
-from textual.widgets import Footer, Header, Input, ListView, ProgressBar, Select, Static
+from textual.widgets import Footer, Header, Input, ListView, ProgressBar, Static
 from textual_image.widget import Image
 from rich.text import Text
 
-from src.youtube.radio import RadioEngine
-from src.search.searcher import YoutubeSearcher
-from src.youtube.player import YTStreamVLC
-from src.youtube.utils import track_signature
+from src.navidrome.config import NavidromeConfig
+from src.navidrome.client import NavidromeClient
+from src.navidrome.radio import RadioEngine
+from src.search.searcher import NavidromeSearcher
+from src.navidrome.player import NavidromeStreamVLC
+from src.navidrome.utils import track_signature
 
+from .config_screen import ConfigScreen
 from .keybindings import BINDINGS
 
 class Tuitify(App):
@@ -32,9 +35,11 @@ class Tuitify(App):
     def __init__(self) -> None:
         super().__init__()
 
-        self.searcher = YoutubeSearcher(default_results=20)
-        self.player = YTStreamVLC()
-        self.radio = RadioEngine()
+        self.config = NavidromeConfig.load()
+        self.client: NavidromeClient | None = None
+        self.searcher: NavidromeSearcher | None = None
+        self.player: NavidromeStreamVLC | None = None
+        self.radio: RadioEngine | None = None
 
         self.search_results: list[dict[str, Any]] = []
         self.recommendation_queue: list[dict[str, Any]] = []
@@ -43,6 +48,8 @@ class Tuitify(App):
         self.current_duration_seconds: int = 0
         self.playback_nonce = 0
         self.search_in_progress = False
+        self.shuffle_mode = False
+        self.loop_mode = False
         self.search_cache: dict[str, list[dict[str, Any]]] = {}
         self.theme_names: list[str] = []
         self.prefetched_track: dict[str, Any] | None = None
@@ -57,14 +64,8 @@ class Tuitify(App):
                 # Search Panel
                 with VerticalScroll(id="search-panel", classes="panel"):
                     with Horizontal(id="search-controls"):
-                        yield Select(
-                            options=[("Music", "music"), ("Podcast", "podcast")],
-                            value="music",
-                            id="media-select",
-                        )
-
                         yield Input(
-                            placeholder="Search and press Enter",
+                            placeholder="Search your Navidrome library and press Enter",
                             id="search-input",
                         )
                     with HorizontalScroll(classes="search-results-shell"):
@@ -79,6 +80,8 @@ class Tuitify(App):
 
                     yield Static("Title", id="title")
                     yield Static("Artist", id="artist")
+                    yield Static("♡ Like", id="like")
+                    yield Static("", id="loop")
                     yield ProgressBar(total=100, id="progress")
                     
                     yield Static("0:00 / 0:00", id="time")
@@ -90,7 +93,38 @@ class Tuitify(App):
         self._initialize_themes()
         self._restore_theme()
         self.set_interval(0.5, self._refresh_player_progress)
+
+        if self.config.is_complete:
+            self._init_services(self.config)
+            self.action_focus_input()
+        else:
+            self._open_config()
+
+    def _init_services(self, config: NavidromeConfig) -> None:
+        self.config = config
+        self.client = NavidromeClient(config, default_results=20)
+        self.searcher = NavidromeSearcher(self.client)
+        self.player = NavidromeStreamVLC(self.client)
+        self.radio = RadioEngine(self.client)
+
+    def _open_config(self) -> None:
+        allow_cancel = self.client is not None
+        self.push_screen(
+            ConfigScreen(self.config, allow_cancel=allow_cancel),
+            self._on_config_done,
+        )
+
+    def _on_config_done(self, config: NavidromeConfig | None) -> None:
+        if config is None:
+            if self.client is None:
+                self.exit()
+            return
+        self._init_services(config)
+        self.notify("Connected to Navidrome.", severity="information")
         self.action_focus_input()
+
+    def action_open_config(self) -> None:
+        self._open_config()
 
     # Key Bindings
     def action_quit(self) -> None:
@@ -98,7 +132,8 @@ class Tuitify(App):
         self.current_track = None
         self.recommendation_queue.clear()
         self.recommendation_urls = []
-        self.player.stop()
+        if self.player:
+            self.player.stop()
         self._update_next_up_ui()
         self.exit()
 
@@ -107,6 +142,68 @@ class Tuitify(App):
             return
         self.player.toggle_pause()
 
+    def action_toggle_like(self) -> None:
+        if not self.client or not self.current_track:
+            self.notify("Nothing playing to like.", severity="warning")
+            return
+        self._toggle_like(self.current_track)
+
+    @work(thread=True, group="like")
+    def _toggle_like(self, track: dict[str, Any]) -> None:
+        song_id = track.get("id")
+        if not song_id:
+            return
+
+        currently_liked = bool(track.get("starred"))
+        try:
+            if currently_liked:
+                self.client.unstar(song_id)
+            else:
+                self.client.star(song_id)
+        except Exception as error:
+            self.call_from_thread(
+                self.notify, f"Could not update like: {error}", severity="error"
+            )
+            return
+
+        track["starred"] = not currently_liked
+        self.call_from_thread(self._update_like_ui)
+        self.call_from_thread(
+            self.notify,
+            "Removed from liked songs" if currently_liked else "Liked ♥",
+            severity="information",
+        )
+
+    def _update_like_ui(self) -> None:
+        liked = bool(self.current_track and self.current_track.get("starred"))
+        widget = self.query_one("#like", Static)
+        widget.update("♥ Liked" if liked else "♡ Like")
+        widget.set_class(liked, "liked")
+
+    def action_toggle_loop(self) -> None:
+        self.loop_mode = not self.loop_mode
+        self._update_loop_ui()
+        self.notify(
+            "Loop on — repeating this track until you skip"
+            if self.loop_mode
+            else "Loop off",
+            severity="information",
+        )
+
+    def _update_loop_ui(self) -> None:
+        widget = self.query_one("#loop", Static)
+        widget.update("🔁 Loop" if self.loop_mode else "")
+        widget.set_class(self.loop_mode, "active")
+
+    def action_toggle_player_view(self) -> None:
+        self.screen.toggle_class("player-only")
+        # Blur the search input so single-key shortcuts keep working in the
+        # compact view; restore focus to it when expanding back.
+        if self.screen.has_class("player-only"):
+            self.set_focus(None)
+        else:
+            self.action_focus_input()
+
     def action_next_track(self) -> None:
         if not self.current_track:
             return
@@ -114,12 +211,32 @@ class Tuitify(App):
         self.radio.mark_played(self.current_track)
         next_track = self._pop_recommendation()
         if not next_track:
-            next_track = self.radio.next_track(seed=self.current_track)
+            next_track = self._fallback_next(seed=self.current_track)
             if not next_track:
                 self.notify("No next recommendation ready.", severity="warning")
                 return
 
         self.start_playback(next_track)
+
+    def action_shuffle_all(self) -> None:
+        if not self.radio:
+            self.notify("Configure your Navidrome server first.", severity="warning")
+            self._open_config()
+            return
+
+        self.notify("Shuffling your whole library...", severity="information")
+        self._start_shuffle()
+
+    @work(exclusive=True, thread=True, group="shuffle")
+    def _start_shuffle(self) -> None:
+        first_track = self.radio.random_next()
+        if not first_track:
+            self.call_from_thread(
+                self.notify, "No tracks found to shuffle.", severity="warning"
+            )
+            return
+        self.shuffle_mode = True
+        self.call_from_thread(self.start_playback, first_track)
 
     def action_seek_backward(self) -> None:
         if self.query_one("#search-input", Input).has_focus:
@@ -135,12 +252,16 @@ class Tuitify(App):
         self.query_one("#search-input", Input).focus()
 
     def action_volume_up(self) -> None:
+        if not self.player:
+            return
         current_volume = self.player.get_volume()
         new_volume = self.player.set_volume(current_volume + 5)
         self.notify(f"Volume: {new_volume}%", severity="information")
         self._refresh_player_progress()
 
     def action_volume_down(self) -> None:
+        if not self.player:
+            return
         current_volume = self.player.get_volume()
         new_volume = self.player.set_volume(current_volume - 5)
         self.notify(f"Volume: {new_volume}%", severity="information")
@@ -205,10 +326,17 @@ class Tuitify(App):
 
         track = self._safe_get(self.search_results, event.index)
         if track:
+            # Picking a specific track exits shuffle and returns to similar-radio.
+            self.shuffle_mode = False
             self.start_playback(track)
 
     # Search function
     def action_search(self):
+        if not self.searcher:
+            self.notify("Configure your Navidrome server first.", severity="warning")
+            self._open_config()
+            return
+
         if self.search_in_progress:
             self.notify("Search already in progress...", severity="warning")
             return
@@ -219,9 +347,8 @@ class Tuitify(App):
             self.notify("Enter a query", "warning")
             return
 
-        mode = str(self.query_one("#media-select", Select).value or "music").lower()
-        full_query = query.strip() if mode == "music" else f"podcast {query}".strip()
-        cache_key = f"{mode}:" + " ".join(full_query.lower().split())
+        full_query = query.strip()
+        cache_key = " ".join(full_query.lower().split())
 
         cached_results = self.search_cache.get(cache_key)
         if cached_results is not None:
@@ -234,15 +361,15 @@ class Tuitify(App):
             )
             return
 
-        self._run_search(full_query, mode)
+        self._run_search(full_query)
 
     @work(exclusive=True, thread=True, group="search")
-    def _run_search(self, query: str, mode: str) -> None:
+    def _run_search(self, query: str) -> None:
         self.search_in_progress = True
         self.call_from_thread(self._set_search_loading, True)
         started_at = time.perf_counter()
         try:
-            results = self.searcher.search_media_details(query, media_type=mode)
+            results = self.searcher.search_media_details(query)
         except Exception as error:
             self.call_from_thread(
                 self.notify, f"Search failed: {error}", severity="error"
@@ -250,19 +377,18 @@ class Tuitify(App):
             results = []
 
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        self.call_from_thread(self._set_search_results, query, mode, results, elapsed_ms)
+        self.call_from_thread(self._set_search_results, query, results, elapsed_ms)
         self.search_in_progress = False
 
     def _set_search_loading(self, is_loading: bool) -> None:
         results_view = self.query_one("#search-results", ListView)
-        media_type = "Music" if str(self.query_one("#media-select", Select).value) == "music" else "Podcast"
 
         if is_loading:
             results_view.clear()
             results_view.append(
                 ListItem(
                     Static(
-                        f"Searching {media_type.lower()} ... please wait",
+                        "Searching ... please wait",
                         classes="result-line",
                     )
                 )
@@ -273,13 +399,12 @@ class Tuitify(App):
     def _set_search_results(
         self,
         query: str,
-        mode: str,
         results: list[dict[str, Any]],
         elapsed_ms: int,
     ) -> None:
         self._set_search_loading(False)
         self.search_results = results
-        cache_key = f"{mode}:" + " ".join(query.lower().split())
+        cache_key = " ".join(query.lower().split())
         self.search_cache[cache_key] = results
         if len(self.search_cache) > 30:
             oldest_key = next(iter(self.search_cache))
@@ -339,6 +464,9 @@ class Tuitify(App):
             results_view.index = 0
 
     def start_playback(self, track: dict[str, Any]) -> None:
+        if not self.player or not self.radio:
+            self.notify("Configure your Navidrome server first.", severity="warning")
+            return
         if self.current_track and track_signature(self.current_track) != track_signature(track):
             self.radio.mark_played(self.current_track)
         self.playback_nonce += 1
@@ -349,31 +477,41 @@ class Tuitify(App):
     @work(exclusive=True, thread=True, group="playback")
     def _playback_session(self, nonce: int, track: dict[str, Any]) -> None:
         current_track = track
+        replaying = False
 
         while nonce == self.playback_nonce:
-            self.call_from_thread(self._set_current_track, current_track)
-            self._seed_recommendations(current_track, limit=10)
+            if not replaying:
+                self.call_from_thread(self._set_current_track, current_track)
+                self._seed_recommendations(current_track, limit=10)
+            replaying = False
 
-            # Check if this track was already prefetched
+            # Check if this track was already prefetched. Skip prefetch entirely
+            # while looping since the next track is just this one again.
             prefetched_url = None
-            if self.prefetched_track and track_signature(self.prefetched_track) == track_signature(current_track):
+            if not self.loop_mode and self.prefetched_track and track_signature(self.prefetched_track) == track_signature(current_track):
                 prefetched_url = self.prefetched_stream_url
 
             # Reset prefetch buffers
             self.prefetched_track = None
             self.prefetched_stream_url = None
 
+            on_near_end = (
+                None
+                if self.loop_mode
+                else lambda: self.call_from_thread(self._start_prefetch_next_track)
+            )
+
             try:
                 end_state = self.player.play_track(
                     current_track,
                     retry_on_error=True,
                     prefetched_stream_url=prefetched_url,
-                    on_near_end=lambda: self.call_from_thread(self._start_prefetch_next_track),
+                    on_near_end=on_near_end,
                 )
             except Exception as error:
                 next_track = self._pop_recommendation()
                 if not next_track:
-                    next_track = self.radio.next_track(seed=current_track)
+                    next_track = self._fallback_next(seed=current_track)
 
                 if not next_track:
                     return
@@ -387,10 +525,15 @@ class Tuitify(App):
             if end_state != "ended":
                 return
 
+            # Loop mode: replay the same track without re-seeding or resetting UI.
+            if self.loop_mode:
+                replaying = True
+                continue
+
             self.radio.mark_played(current_track)
             next_track = self._pop_recommendation()
             if not next_track:
-                next_track = self.radio.next_track(seed=current_track)
+                next_track = self._fallback_next(seed=current_track)
 
             if not next_track:
                 return
@@ -410,6 +553,7 @@ class Tuitify(App):
         )
         vol = self.player.get_volume()
         self.query_one("#time", Static).update(f"0:00 / {total_time}  |  Vol: {vol}%")
+        self._update_like_ui()
 
         thumbnail_url = track.get("thumbnail")
         if thumbnail_url:
@@ -433,6 +577,9 @@ class Tuitify(App):
 
     @work(exclusive=True, thread=True, group="prefetch")
     def _start_prefetch_next_track(self) -> None:
+        if not self.player or not self.radio:
+            return
+
         # Determine the next track that would be played
         next_track = None
         if self.recommendation_queue:
@@ -440,52 +587,47 @@ class Tuitify(App):
         else:
             # Seed from current track if we don't have recommendations yet
             if self.current_track:
-                next_track = self.radio.next_track(seed=self.current_track)
+                next_track = self._fallback_next(seed=self.current_track)
 
         if not next_track:
             return
 
-        # Fetch the stream URL
-        video_url = next_track.get("url")
-        if not video_url:
-            video_id = next_track.get("id")
-            if video_id:
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
-                next_track["url"] = video_url
-
-        if not video_url:
+        stream_url = next_track.get("url")
+        if not stream_url:
             return
 
         try:
-            stream_url, _ = self.player.service.get_stream_info(video_url)
+            stream_url, _ = self.player.service.get_stream_info(stream_url)
             self.prefetched_track = next_track
             self.prefetched_stream_url = stream_url
         except Exception:
             self.prefetched_track = None
             self.prefetched_stream_url = None
 
+    def _fallback_next(self, seed: dict[str, Any]) -> dict[str, Any] | None:
+        if self.shuffle_mode:
+            return self.radio.random_next()
+        return self.radio.next_track(seed=seed)
+
     def _seed_recommendations(self, seed_track: dict[str, Any], limit: int = 10) -> None:
+        if not self.radio:
+            return
+
+        if self.shuffle_mode:
+            candidates = self.radio.build_random_queue(limit=limit)
+        else:
+            candidates = self.radio.build_queue(seed_track, limit=limit * 2)
+
         seeded: list[dict[str, Any]] = []
 
-        for candidate in self.radio.build_queue(seed_track, limit=limit * 2):
+        for candidate in candidates:
             if len(seeded) >= limit:
                 break
 
-            duration_seconds = int(candidate.get("duration") or 0)
-            if duration_seconds < 120:
+            if not candidate.get("url"):
                 continue
 
-            candidate_url = candidate.get("url")
-            if not candidate_url:
-                candidate_id = candidate.get("id")
-                if not candidate_id:
-                    continue
-                candidate_url = f"https://www.youtube.com/watch?v={candidate_id}"
-                candidate["url"] = candidate_url
-            candidate_id = str(candidate.get("id") or "")
-            if candidate_id and not candidate.get("thumbnail"):
-                candidate["thumbnail"] = f"https://i.ytimg.com/vi/{candidate_id}/hqdefault.jpg"
-
+            duration_seconds = int(candidate.get("duration") or 0)
             if not candidate.get("total_play_time"):
                 candidate["total_play_time"] = self._format_seconds(duration_seconds)
             if not candidate.get("artist_name"):
