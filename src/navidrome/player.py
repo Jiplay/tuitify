@@ -29,6 +29,12 @@ class NavidromeStreamVLC:
         self.player = self.instance.media_player_new()
         self.player.audio_set_volume(80)
 
+        # Smooth-position tracking: VLC's get_time() is authoritative but
+        # coarse/jumpy, so we interpolate with a wall clock between its updates.
+        self._anchor_pos_ms = 0.0
+        self._anchor_mono: float | None = None
+        self._resync_threshold_ms = 1200
+
     def play_track(
         self,
         track: dict[str, Any],
@@ -70,6 +76,7 @@ class NavidromeStreamVLC:
     def _start_stream(self, stream_url: str, resume_position_ms: int) -> None:
         media = self.instance.media_new(stream_url)
         self.player.set_media(media)
+        self._reset_position_tracking()
         self.player.play()
         time.sleep(1)
         if resume_position_ms > 0:
@@ -113,12 +120,47 @@ class NavidromeStreamVLC:
 
     def stop(self) -> None:
         self.player.stop()
+        self._reset_position_tracking()
 
     def toggle_pause(self) -> None:
         self.player.pause()
 
+    def _reset_position_tracking(self) -> None:
+        self._anchor_pos_ms = 0.0
+        self._anchor_mono = None
+
     def current_time_ms(self) -> int:
-        return max(self.player.get_time(), 0)
+        """Smoothly interpolated playback position in milliseconds.
+
+        VLC reports position in coarse, uneven steps. We advance a wall-clock
+        estimate from the last known anchor and only re-anchor to VLC when it
+        diverges enough to be a real event (seek, pause, buffering), keeping the
+        countdown gliding between VLC's sparse updates.
+        """
+        now = time.monotonic()
+        raw = self.player.get_time()
+        if raw is None or raw < 0:
+            self._reset_position_tracking()
+            return 0
+
+        playing = self.player.is_playing()
+
+        if self._anchor_mono is None:
+            self._anchor_pos_ms = float(raw)
+            self._anchor_mono = now
+
+        elapsed_ms = (now - self._anchor_mono) * 1000.0 if playing else 0.0
+        estimate = self._anchor_pos_ms + elapsed_ms
+
+        if not playing or abs(raw - estimate) > self._resync_threshold_ms:
+            self._anchor_pos_ms = float(raw)
+            self._anchor_mono = now
+            estimate = float(raw)
+
+        length = self.player.get_length()
+        if length and length > 0:
+            estimate = min(estimate, float(length))
+        return int(max(estimate, 0.0))
 
     def total_length_ms(self) -> int:
         return max(self.player.get_length(), 0)

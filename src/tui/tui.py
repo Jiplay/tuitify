@@ -80,11 +80,21 @@ class Tuitify(App):
 
                     yield Static("Title", id="title")
                     yield Static("Artist", id="artist")
-                    yield Static("♡ Like", id="like")
-                    yield Static("", id="loop")
-                    yield ProgressBar(total=100, id="progress")
-                    
+                    yield Static("[b #56B6C6]L[/] ♡ Like", id="like")
+                    yield Static("[b #56B6C6]R[/] Loop", id="loop")
+                    # Hide Textual's built-in ETA: it guesses time-remaining
+                    # from the update rate (jumpy, often "--:--"). We render our
+                    # own countdown from the real position + track duration.
+                    yield ProgressBar(total=100, id="progress", show_eta=False)
+
                     yield Static("0:00 / 0:00", id="time")
+                    yield Static(
+                        "[b #56B6C6]Space[/] Play/Pause   "
+                        "[b #56B6C6]N[/] Next   "
+                        "[b #56B6C6]S[/] Shuffle all   "
+                        "[b #56B6C6]F[/] Liked songs",
+                        id="controls",
+                    )
                     yield Static("Next Up: -", id="next-up")
 
         yield Footer()
@@ -92,7 +102,7 @@ class Tuitify(App):
     def on_mount(self) -> None:
         self._initialize_themes()
         self._restore_theme()
-        self.set_interval(0.5, self._refresh_player_progress)
+        self.set_interval(0.25, self._refresh_player_progress)
 
         if self.config.is_complete:
             self._init_services(self.config)
@@ -177,7 +187,7 @@ class Tuitify(App):
     def _update_like_ui(self) -> None:
         liked = bool(self.current_track and self.current_track.get("starred"))
         widget = self.query_one("#like", Static)
-        widget.update("♥ Liked" if liked else "♡ Like")
+        widget.update("[b #56B6C6]L[/] ♥ Liked" if liked else "[b #56B6C6]L[/] ♡ Like")
         widget.set_class(liked, "liked")
 
     def action_toggle_loop(self) -> None:
@@ -192,7 +202,7 @@ class Tuitify(App):
 
     def _update_loop_ui(self) -> None:
         widget = self.query_one("#loop", Static)
-        widget.update("🔁 Loop" if self.loop_mode else "")
+        widget.update("[b #56B6C6]R[/] 🔁 Loop on" if self.loop_mode else "[b #56B6C6]R[/] Loop")
         widget.set_class(self.loop_mode, "active")
 
     def action_toggle_player_view(self) -> None:
@@ -288,7 +298,7 @@ class Tuitify(App):
             return
         current_volume = self.player.get_volume()
         new_volume = self.player.set_volume(current_volume + 5)
-        self.notify(f"Volume: {new_volume}%", severity="information")
+        self._flash(f"Volume: {new_volume}%")
         self._refresh_player_progress()
 
     def action_volume_down(self) -> None:
@@ -296,8 +306,17 @@ class Tuitify(App):
             return
         current_volume = self.player.get_volume()
         new_volume = self.player.set_volume(current_volume - 5)
-        self.notify(f"Volume: {new_volume}%", severity="information")
+        self._flash(f"Volume: {new_volume}%")
         self._refresh_player_progress()
+
+    def _flash(self, message: str, severity: str = "information") -> None:
+        """Show a toast that replaces any currently visible one.
+
+        Used for rapidly repeated actions (e.g. volume) so a burst of presses
+        leaves a single up-to-date toast instead of a stack.
+        """
+        self.clear_notifications()
+        self.notify(message, severity=severity)
 
     def action_cycle_theme(self) -> None:
         if not self.theme_names:
@@ -376,7 +395,7 @@ class Tuitify(App):
         query = self.query_one("#search-input", Input).value
 
         if not query.strip():
-            self.notify("Enter a query", "warning")
+            self.notify("Enter a query", severity="warning")
             return
 
         full_query = query.strip()
@@ -578,13 +597,14 @@ class Tuitify(App):
 
         self.query_one("#title", Static).update(str(track.get("title", "Unknown title")))
         self.query_one("#artist", Static).update(str(track.get("artist_name") or "-"))
-        total_time = (
-            "LIVE"
-            if not track.get("duration")
-            else str(track.get("total_play_time") or "0:00")
-        )
         vol = self.player.get_volume()
-        self.query_one("#time", Static).update(f"0:00 / {total_time}  |  Vol: {vol}%")
+        if track.get("duration"):
+            total_time = str(track.get("total_play_time") or "0:00")
+            self.query_one("#time", Static).update(
+                f"0:00 / {total_time}  -{total_time}  |  Vol: {vol}%"
+            )
+        else:
+            self.query_one("#time", Static).update(f"0:00 / LIVE  |  Vol: {vol}%")
         self._update_like_ui()
 
         thumbnail_url = track.get("thumbnail")
@@ -703,11 +723,14 @@ class Tuitify(App):
             return
 
         vol = self.player.get_volume()
+        clamped_elapsed = min(elapsed_ms, duration_ms)
+        remaining_ms = max(duration_ms - clamped_elapsed, 0)
         self.query_one("#progress", ProgressBar).update(
-            total=duration_ms, progress=min(elapsed_ms, duration_ms)
+            total=duration_ms, progress=clamped_elapsed
         )
         self.query_one("#time", Static).update(
-            f"{self._format_ms(elapsed_ms)} / {self._format_ms(duration_ms)}  |  Vol: {vol}%"
+            f"{self._format_ms(clamped_elapsed)} / {self._format_ms(duration_ms)}"
+            f"  -{self._format_ms(remaining_ms)}  |  Vol: {vol}%"
         )
 
     def _seek_relative_ms(self, delta_ms: int) -> None:

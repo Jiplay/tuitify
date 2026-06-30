@@ -143,8 +143,18 @@ Screen {
 
     #loop {
         height: 1;
+        color: #6b7280;
+    }
+
+    #loop.active {
         color: #98C379;
         text-style: bold;
+    }
+
+    #controls {
+        height: auto;
+        color: #6b7280;
+        margin-top: 1;
     }
 
     #next-up {
