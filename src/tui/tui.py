@@ -238,6 +238,38 @@ class Tuitify(App):
         self.shuffle_mode = True
         self.call_from_thread(self.start_playback, first_track)
 
+    def action_browse_liked(self) -> None:
+        if not self.client:
+            self.notify("Configure your Navidrome server first.", severity="warning")
+            self._open_config()
+            return
+
+        self._load_liked_songs()
+
+    @work(exclusive=True, thread=True, group="liked")
+    def _load_liked_songs(self) -> None:
+        self.call_from_thread(self._set_search_loading, True)
+        try:
+            results = self.client.get_starred_songs()
+        except Exception as error:
+            self.call_from_thread(
+                self.notify, f"Could not load liked songs: {error}", severity="error"
+            )
+            self.call_from_thread(self._set_search_loading, False)
+            return
+
+        self.call_from_thread(self._show_liked_results, results)
+
+    def _show_liked_results(self, results: list[dict[str, Any]]) -> None:
+        self._set_search_loading(False)
+        self.search_results = results
+        self.render_search_results()
+        if results:
+            self.query_one("#search-results", ListView).focus()
+            self.notify(f"{len(results)} liked songs", severity="information")
+        else:
+            self.notify("No liked songs yet.", severity="information")
+
     def action_seek_backward(self) -> None:
         if self.query_one("#search-input", Input).has_focus:
             return

@@ -92,6 +92,12 @@ class NavidromeClient:
     def unstar(self, song_id: str) -> None:
         self._request("unstar", {"id": song_id})
 
+    def get_starred_songs(self) -> list[dict[str, Any]]:
+        """Return every starred (liked) song in the library."""
+        payload = self._request("getStarred2")
+        songs = payload.get("starred2", {}).get("song", [])
+        return [self._to_track(song) for song in songs]
+
     # --- Search --------------------------------------------------------
 
     def search_songs(

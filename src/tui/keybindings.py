@@ -12,6 +12,7 @@ BINDINGS = [
         Binding("s", "shuffle_all", "Shuffle All", show=True),
         Binding("p", "toggle_player_view", "Player View", show=True),
         Binding("l", "toggle_like", "Like", show=True),
+        Binding("f", "browse_liked", "Liked Songs", show=True),
         Binding("r", "toggle_loop", "Loop", show=True),
         Binding("left", "seek_backward", "← Back 10s", show=True),
         Binding("right", "seek_forward", "→ Forward 10s", show=True),

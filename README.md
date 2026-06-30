@@ -118,6 +118,7 @@ export NAVIDROME_PASSWORD="your-password"
 - `s`: Shuffle all — play random tracks from your whole library
 - `p`: Toggle compact player-only view (hides search + chrome)
 - `l`: Like / unlike the current track (stars it in Navidrome) ♥
+- `f`: Browse your liked songs (lists everything you've starred)
 - `r`: Loop — repeat the current track endlessly until you skip 🔁
 - `tab`: switch between panels
 - `←` / `→`: Seek backward/forward (10s)
