@@ -42,6 +42,8 @@ class Tuitify(App):
         self.radio: RadioEngine | None = None
 
         self.search_results: list[dict[str, Any]] = []
+        self.history: list[dict[str, Any]] = []
+        self._suppress_history_push = False
         self.recommendation_queue: list[dict[str, Any]] = []
         self.recommendation_urls: list[str] = []
         self.current_track: dict[str, Any] | None = None
@@ -90,6 +92,7 @@ class Tuitify(App):
                     yield Static("0:00 / 0:00", id="time")
                     yield Static(
                         "[b #56B6C6]Space[/] Play/Pause   "
+                        "[b #56B6C6]B[/] Previous   "
                         "[b #56B6C6]N[/] Next   "
                         "[b #56B6C6]S[/] Shuffle all   "
                         "[b #56B6C6]F[/] Liked songs",
@@ -140,6 +143,7 @@ class Tuitify(App):
     def action_quit(self) -> None:
         self.playback_nonce += 1
         self.current_track = None
+        self.history.clear()
         self.recommendation_queue.clear()
         self.recommendation_urls = []
         if self.player:
@@ -227,6 +231,28 @@ class Tuitify(App):
                 return
 
         self.start_playback(next_track)
+
+    def action_previous_track(self) -> None:
+        if not self.player or not self.current_track:
+            return
+
+        # Classic "previous" behaviour: if the track has been playing for a
+        # while, restart it; only jump back to the last song when the current
+        # one was skipped near the start.
+        if self.player.current_time_ms() > 5000:
+            self.player.player.set_time(0)
+            self._flash("Restarting track")
+            return
+
+        if not self.history:
+            self.notify("No previous track to go back to.", severity="warning")
+            return
+
+        previous_track = self.history.pop()
+        # Don't push the track we're leaving back onto the history stack, so
+        # repeated Previous presses keep walking backwards instead of ping-ponging.
+        self._suppress_history_push = True
+        self.start_playback(previous_track)
 
     def action_shuffle_all(self) -> None:
         if not self.radio:
@@ -592,6 +618,20 @@ class Tuitify(App):
             current_track = next_track
 
     def _set_current_track(self, track: dict[str, Any]) -> None:
+        # Remember the track we're leaving so Previous can return to it. Skip
+        # this when we're navigating backwards (the suppression flag) and when
+        # the "new" track is really the same one (looping / retries).
+        previous_track = self.current_track
+        if (
+            previous_track
+            and not self._suppress_history_push
+            and track_signature(previous_track) != track_signature(track)
+        ):
+            self.history.append(previous_track)
+            if len(self.history) > 50:
+                self.history.pop(0)
+        self._suppress_history_push = False
+
         self.current_track = track
         self.current_duration_seconds = int(track.get("duration") or 0)
 

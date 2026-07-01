@@ -9,6 +9,7 @@ BINDINGS = [
         Binding("t", "cycle_theme", "Cycle Theme", show=True),
         Binding("space", "toggle_pause", "Play/Pause", show=True),
         Binding("n", "next_track", "Next", show=True),
+        Binding("b", "previous_track", "Previous", show=True),
         Binding("s", "shuffle_all", "Shuffle All", show=True),
         Binding("p", "toggle_player_view", "Player View", show=True),
         Binding("l", "toggle_like", "Like", show=True),
