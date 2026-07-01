@@ -85,6 +85,32 @@ Simply run the `main.py` file:
 uv run ./main.py
 ```
 
+### Installing as a Command (run from anywhere)
+
+To use Tuitify from any directory as a plain `tuitify` command — instead of
+having to `cd` into the project and call `uv run` — install it as a
+[uv tool](https://docs.astral.sh/uv/concepts/tools/):
+
+```bash
+uv tool install --editable .
+```
+
+This puts a `tuitify` executable on your `PATH` (in `~/.local/bin`). Open a new
+shell and run it from anywhere:
+
+```bash
+tuitify
+```
+
+Notes:
+- `--editable` links the command to this source folder, so `git pull` and local
+  edits take effect immediately — no reinstall needed.
+- If `tuitify` isn't found, make sure `~/.local/bin` is on your `PATH`
+  (run `uv tool update-shell`, then restart your shell).
+- Re-run the install command only after changing `pyproject.toml` (dependencies
+  or the entry point).
+- To remove it: `uv tool uninstall tuitify`.
+
 ### Configuration
 
 On first launch, Tuitify shows a connection screen asking for three things:
