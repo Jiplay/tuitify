@@ -126,6 +126,9 @@ Screen {
         overflow: hidden;
     }
 
+    /* Preserve the cover's aspect ratio (auto width at full height). The ghost
+       strip is handled by clearing the previous cover first, which collapses
+       this widget and forces the frame to repaint before the new one draws. */
     #album-art {
         width: auto;
         height: 100%;

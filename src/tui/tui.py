@@ -607,11 +607,12 @@ class Tuitify(App):
             self.query_one("#time", Static).update(f"0:00 / LIVE  |  Vol: {vol}%")
         self._update_like_ui()
 
+        # Clear the previous cover immediately so a narrower new one can't
+        # leave a ghost strip of the old image while the next one loads.
+        self._set_artwork(None)
         thumbnail_url = track.get("thumbnail")
         if thumbnail_url:
             self._load_artwork(str(thumbnail_url))
-        else:
-            self._set_artwork(None)
 
     @work(exclusive=True, thread=True, group="artwork")
     def _load_artwork(self, image_url: str) -> None:
