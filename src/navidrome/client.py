@@ -168,6 +168,7 @@ class NavidromeClient:
             "url": self.stream_url(song_id),
             "total_play_time": self._format_duration(duration),
             "duration": duration,
+            "bpm": song.get("bpm"),
             "artist_name": song.get("artist") or "Unknown artist",
             "album_name": song.get("album"),
             "artist_id": song.get("artistId"),

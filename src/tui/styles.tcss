@@ -134,6 +134,20 @@ Screen {
         height: 100%;
     }
 
+    /* Beat visualizer lives in the same frame as the cover; only one shows at
+       a time. Default: cover visible, animation hidden. */
+    #visualizer {
+        display: none;
+    }
+
+    .art-frame.show-visualizer #album-art {
+        display: none;
+    }
+
+    .art-frame.show-visualizer #visualizer {
+        display: block;
+    }
+
     #like {
         color: #6b7280;
         height: 1;

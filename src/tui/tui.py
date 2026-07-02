@@ -24,6 +24,7 @@ from src.navidrome.utils import track_signature
 
 from .config_screen import ConfigScreen
 from .keybindings import BINDINGS
+from .visualizer import BeatVisualizer
 
 class Tuitify(App):
 
@@ -51,11 +52,13 @@ class Tuitify(App):
         self.playback_nonce = 0
         self.search_in_progress = False
         self.shuffle_mode = False
+        self.liked_shuffle_mode = False
         self.loop_mode = False
         self.search_cache: dict[str, list[dict[str, Any]]] = {}
         self.theme_names: list[str] = []
         self.prefetched_track: dict[str, Any] | None = None
         self.prefetched_stream_url: str | None = None
+        self.visualizer_mode = False
 
 
     def compose(self):
@@ -79,6 +82,12 @@ class Tuitify(App):
 
                     with Container(id="art-frame", classes="art-frame"):
                         yield Image(id="album-art")
+                        yield BeatVisualizer(
+                            position_provider=self._visualizer_position,
+                            bpm_provider=self._visualizer_bpm,
+                            palette_provider=self._visualizer_palette,
+                            id="visualizer",
+                        )
 
                     yield Static("Title", id="title")
                     yield Static("Artist", id="artist")
@@ -218,6 +227,38 @@ class Tuitify(App):
         else:
             self.action_focus_input()
 
+    def action_toggle_visualizer(self) -> None:
+        """Swap the album cover for a beat-synced ASCII animation, or back."""
+        self.visualizer_mode = not self.visualizer_mode
+        frame = self.query_one("#art-frame")
+        frame.set_class(self.visualizer_mode, "show-visualizer")
+        self.query_one("#visualizer", BeatVisualizer).set_active(self.visualizer_mode)
+        mode = "Visualizer" if self.visualizer_mode else "Album cover"
+        self.notify(f"Art mode: {mode}", severity="information")
+
+    # --- Visualizer data providers -------------------------------------
+
+    def _visualizer_position(self) -> float:
+        if self.player and self.current_track:
+            return float(self.player.current_time_ms())
+        return 0.0
+
+    def _visualizer_bpm(self) -> float | None:
+        if not self.current_track:
+            return None
+        bpm = self.current_track.get("bpm")
+        try:
+            bpm = float(bpm)
+        except (TypeError, ValueError):
+            return None
+        return bpm if bpm > 0 else None
+
+    def _visualizer_palette(self) -> list[str]:
+        theme = self.current_theme
+        names = ("success", "primary", "accent", "warning", "error")
+        colors = [getattr(theme, name, None) for name in names]
+        return [c for c in colors if c]
+
     def action_next_track(self) -> None:
         if not self.current_track:
             return
@@ -271,40 +312,45 @@ class Tuitify(App):
                 self.notify, "No tracks found to shuffle.", severity="warning"
             )
             return
+        self.liked_shuffle_mode = False
         self.shuffle_mode = True
         self.call_from_thread(self.start_playback, first_track)
 
-    def action_browse_liked(self) -> None:
-        if not self.client:
+    def action_shuffle_liked(self) -> None:
+        if not self.radio:
             self.notify("Configure your Navidrome server first.", severity="warning")
             self._open_config()
             return
 
-        self._load_liked_songs()
+        self.notify("Shuffling your liked songs...", severity="information")
+        self._start_liked_shuffle()
 
-    @work(exclusive=True, thread=True, group="liked")
-    def _load_liked_songs(self) -> None:
-        self.call_from_thread(self._set_search_loading, True)
+    @work(exclusive=True, thread=True, group="shuffle")
+    def _start_liked_shuffle(self) -> None:
         try:
-            results = self.client.get_starred_songs()
+            pool = self.radio.load_liked_pool()
         except Exception as error:
             self.call_from_thread(
                 self.notify, f"Could not load liked songs: {error}", severity="error"
             )
-            self.call_from_thread(self._set_search_loading, False)
             return
 
-        self.call_from_thread(self._show_liked_results, results)
+        if not pool:
+            self.call_from_thread(
+                self.notify, "No liked songs to shuffle.", severity="warning"
+            )
+            return
 
-    def _show_liked_results(self, results: list[dict[str, Any]]) -> None:
-        self._set_search_loading(False)
-        self.search_results = results
-        self.render_search_results()
-        if results:
-            self.query_one("#search-results", ListView).focus()
-            self.notify(f"{len(results)} liked songs", severity="information")
-        else:
-            self.notify("No liked songs yet.", severity="information")
+        first_track = self.radio.liked_next()
+        if not first_track:
+            self.call_from_thread(
+                self.notify, "No liked songs to shuffle.", severity="warning"
+            )
+            return
+
+        self.shuffle_mode = False
+        self.liked_shuffle_mode = True
+        self.call_from_thread(self.start_playback, first_track)
 
     def action_seek_backward(self) -> None:
         if self.query_one("#search-input", Input).has_focus:
@@ -405,6 +451,7 @@ class Tuitify(App):
         if track:
             # Picking a specific track exits shuffle and returns to similar-radio.
             self.shuffle_mode = False
+            self.liked_shuffle_mode = False
             self.start_playback(track)
 
     # Search function
@@ -698,6 +745,8 @@ class Tuitify(App):
             self.prefetched_stream_url = None
 
     def _fallback_next(self, seed: dict[str, Any]) -> dict[str, Any] | None:
+        if self.liked_shuffle_mode:
+            return self.radio.liked_next()
         if self.shuffle_mode:
             return self.radio.random_next()
         return self.radio.next_track(seed=seed)
@@ -706,7 +755,9 @@ class Tuitify(App):
         if not self.radio:
             return
 
-        if self.shuffle_mode:
+        if self.liked_shuffle_mode:
+            candidates = self.radio.build_liked_queue(limit=limit)
+        elif self.shuffle_mode:
             candidates = self.radio.build_random_queue(limit=limit)
         else:
             candidates = self.radio.build_queue(seed_track, limit=limit * 2)

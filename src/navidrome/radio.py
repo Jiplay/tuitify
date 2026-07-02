@@ -29,6 +29,7 @@ class RadioEngine:
         self.album_cooldown = album_cooldown
         self.history: list[dict[str, Any]] = []
         self.queue: list[dict[str, Any]] = []
+        self.liked_pool: list[dict[str, Any]] = []
 
     def mark_played(self, track: dict[str, Any]) -> None:
         if self.history and track_signature(self.history[-1]) == track_signature(track):
@@ -130,6 +131,48 @@ class RadioEngine:
 
     def random_next(self) -> dict[str, Any] | None:
         candidates = self._fetch_random(count=30)
+        if not candidates:
+            return None
+        next_song = random.choice(candidates)
+        self.queue.append(next_song)
+        return next_song
+
+    def load_liked_pool(self) -> list[dict[str, Any]]:
+        """Fetch and cache every liked (starred) song for shuffle playback."""
+        self.liked_pool = clean_tracks(self.client.get_starred_songs())
+        return self.liked_pool
+
+    def _fetch_liked(self, count: int) -> list[dict[str, Any]]:
+        if not self.liked_pool:
+            self.load_liked_pool()
+
+        candidates = list(self.liked_pool)
+        random.shuffle(candidates)
+
+        seen_ids = {track.get("id") for track in self.history}
+        seen_ids.update(track.get("id") for track in self.queue if track.get("id"))
+        seen_signatures = {track_signature(track) for track in self.history}
+        seen_signatures.update(track_signature(track) for track in self.queue)
+
+        filtered = [
+            track
+            for track in candidates
+            if track.get("id")
+            and track["id"] not in seen_ids
+            and track_signature(track) not in seen_signatures
+        ]
+        # Once every liked song has been played recently the filter empties out;
+        # fall back to the full pool so shuffle keeps looping instead of stopping.
+        pool = filtered or candidates
+        return pool[:count]
+
+    def build_liked_queue(self, limit: int = 10) -> list[dict[str, Any]]:
+        planned = self._fetch_liked(count=limit)
+        self.queue = list(planned)
+        return planned
+
+    def liked_next(self) -> dict[str, Any] | None:
+        candidates = self._fetch_liked(count=30)
         if not candidates:
             return None
         next_song = random.choice(candidates)
