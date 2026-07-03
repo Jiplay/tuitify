@@ -124,6 +124,41 @@ class NavidromeClient:
     ) -> list[dict[str, Any]]:
         return self.search_songs(query=query, num_results=num_results)
 
+    def fetch_all_songs_raw(self, page_size: int = 500) -> list[dict[str, Any]]:
+        """Return the raw Subsonic song dicts for the entire library.
+
+        Navidrome's ``search3`` treats an empty query as match-all, so we
+        walk it with ``songOffset`` until a short page signals the end. The
+        raw dicts are returned untouched (no URL building) so callers can
+        safely persist them across sessions; map them with ``to_track`` at
+        use time to rebuild session-scoped stream/cover URLs.
+        """
+        songs: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            payload = self._request(
+                "search3",
+                {
+                    "query": "",
+                    "songCount": page_size,
+                    "songOffset": offset,
+                    "albumCount": 0,
+                    "artistCount": 0,
+                },
+            )
+            batch = payload.get("searchResult3", {}).get("song", [])
+            if not batch:
+                break
+            songs.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return songs
+
+    def to_track(self, song: dict[str, Any]) -> dict[str, Any]:
+        """Map a raw Subsonic song dict to the app's track shape."""
+        return self._to_track(song)
+
     # --- Recommendations ----------------------------------------------
 
     def get_similar_songs(

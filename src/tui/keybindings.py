@@ -6,6 +6,7 @@ BINDINGS = [
         Binding("tab", "focus_next", "Next Panel", show=False),
         Binding("i", "focus_input", "Focus Input", show=True),
         Binding("ctrl+s", "open_config", "Settings", show=True),
+        Binding("ctrl+r", "resync_library", "Resync Library", show=True),
         Binding("t", "cycle_theme", "Cycle Theme", show=True),
         Binding("space", "toggle_pause", "Play/Pause", show=True),
         Binding("n", "next_track", "Next", show=True),

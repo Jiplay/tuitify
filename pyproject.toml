@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pyinstaller>=6.20.0",
     "python-vlc>=3.0.21203",
+    "rapidfuzz>=3.14.5",
     "requests>=2.33.1",
     "textual>=8.2.4",
     "textual-image>=0.12.0",

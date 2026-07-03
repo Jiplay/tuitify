@@ -19,6 +19,7 @@ from src.navidrome.config import NavidromeConfig
 from src.navidrome.client import NavidromeClient
 from src.navidrome.radio import RadioEngine
 from src.search.searcher import NavidromeSearcher
+from src.search.library import LocalLibrary
 from src.navidrome.player import NavidromeStreamVLC
 from src.navidrome.utils import track_signature
 
@@ -39,6 +40,8 @@ class Tuitify(App):
         self.config = NavidromeConfig.load()
         self.client: NavidromeClient | None = None
         self.searcher: NavidromeSearcher | None = None
+        self.library: LocalLibrary | None = None
+        self.library_syncing = False
         self.player: NavidromeStreamVLC | None = None
         self.radio: RadioEngine | None = None
 
@@ -126,8 +129,12 @@ class Tuitify(App):
         self.config = config
         self.client = NavidromeClient(config, default_results=20)
         self.searcher = NavidromeSearcher(self.client)
+        self.library = LocalLibrary(self.client)
         self.player = NavidromeStreamVLC(self.client)
         self.radio = RadioEngine(self.client)
+        # Build the fuzzy index in the background (disk cache first, then a
+        # network fetch if needed) so search is instant once it's ready.
+        self._sync_library()
 
     def _open_config(self) -> None:
         allow_cancel = self.client is not None
@@ -169,33 +176,41 @@ class Tuitify(App):
         if not self.client or not self.current_track:
             self.notify("Nothing playing to like.", severity="warning")
             return
-        self._toggle_like(self.current_track)
 
-    @work(thread=True, group="like")
-    def _toggle_like(self, track: dict[str, Any]) -> None:
+        track = self.current_track
         song_id = track.get("id")
         if not song_id:
             return
 
+        # Optimistically flip the state and update the heart immediately, then
+        # sync with the server in the background. If it fails, we roll back.
         currently_liked = bool(track.get("starred"))
+        track["starred"] = not currently_liked
+        self._update_like_ui()
+        self.notify(
+            "Removed from liked songs" if currently_liked else "Liked ♥",
+            severity="information",
+        )
+        self._toggle_like(track, currently_liked)
+
+    @work(thread=True, group="like")
+    def _toggle_like(self, track: dict[str, Any], was_liked: bool) -> None:
+        song_id = track.get("id")
+        if not song_id:
+            return
+
         try:
-            if currently_liked:
+            if was_liked:
                 self.client.unstar(song_id)
             else:
                 self.client.star(song_id)
         except Exception as error:
+            # Roll back the optimistic update.
+            track["starred"] = was_liked
+            self.call_from_thread(self._update_like_ui)
             self.call_from_thread(
                 self.notify, f"Could not update like: {error}", severity="error"
             )
-            return
-
-        track["starred"] = not currently_liked
-        self.call_from_thread(self._update_like_ui)
-        self.call_from_thread(
-            self.notify,
-            "Removed from liked songs" if currently_liked else "Liked ♥",
-            severity="information",
-        )
 
     def _update_like_ui(self) -> None:
         liked = bool(self.current_track and self.current_track.get("starred"))
@@ -405,7 +420,7 @@ class Tuitify(App):
         next_theme = self.theme_names[next_index]
         self.theme = next_theme
         self._save_theme(next_theme)
-        self.notify(f"Theme: {next_theme}", severity="information")
+        self._flash(f"Theme: {next_theme}")
 
     def action_cursor_up(self) -> None:
         if self.query_one("#search-input", Input).has_focus:
@@ -461,10 +476,6 @@ class Tuitify(App):
             self._open_config()
             return
 
-        if self.search_in_progress:
-            self.notify("Search already in progress...", severity="warning")
-            return
-
         query = self.query_one("#search-input", Input).value
 
         if not query.strip():
@@ -472,8 +483,25 @@ class Tuitify(App):
             return
 
         full_query = query.strip()
-        cache_key = " ".join(full_query.lower().split())
 
+        # Local fuzzy search: instant and typo-tolerant. While the library
+        # index is still loading we fall back to the server search3 endpoint.
+        if self.library and self.library.loaded:
+            results = self.library.search(full_query)
+            self.search_results = results
+            self.render_search_results()
+            self.query_one("#search-results", ListView).focus()
+            if results:
+                self.notify(f"Found {len(results)} matches", severity="information")
+            else:
+                self.notify("No matches found", severity="warning")
+            return
+
+        if self.search_in_progress:
+            self.notify("Search already in progress...", severity="warning")
+            return
+
+        cache_key = " ".join(full_query.lower().split())
         cached_results = self.search_cache.get(cache_key)
         if cached_results is not None:
             self.search_results = cached_results
@@ -486,6 +514,39 @@ class Tuitify(App):
             return
 
         self._run_search(full_query)
+
+    def action_resync_library(self) -> None:
+        if not self.library:
+            self.notify("Configure your Navidrome server first.", severity="warning")
+            return
+        if self.library_syncing:
+            self.notify("Library sync already in progress...", severity="warning")
+            return
+        self._sync_library(force=True)
+
+    @work(exclusive=True, thread=True, group="library-sync")
+    def _sync_library(self, force: bool = False) -> None:
+        if not self.library:
+            return
+        self.library_syncing = True
+        self.call_from_thread(
+            self._flash,
+            "Resyncing library..." if force else "Loading library...",
+        )
+        try:
+            count = self.library.load(force=force)
+        except Exception as error:
+            self.call_from_thread(
+                self.notify, f"Library sync failed: {error}", severity="error"
+            )
+            self.library_syncing = False
+            return
+        self.call_from_thread(
+            self.notify,
+            f"Library ready: {count} songs searchable (fuzzy)",
+            severity="information",
+        )
+        self.library_syncing = False
 
     @work(exclusive=True, thread=True, group="search")
     def _run_search(self, query: str) -> None:
