@@ -546,6 +546,24 @@ class Tuitify(App):
             f"Library ready: {count} songs searchable (fuzzy)",
             severity="information",
         )
+
+        # Stale-while-revalidate: when the initial load came from the on-disk
+        # cache it may be missing songs added on the server since last time.
+        # Refresh from the network in this same thread and rebuild the fuzzy
+        # index so new songs become searchable without a manual resync.
+        if not force and self.library.served_from_cache:
+            try:
+                new_count = self.library.load(force=True)
+            except Exception:
+                # A stale-but-usable index beats surfacing a background error.
+                new_count = count
+            if new_count != count:
+                self.call_from_thread(
+                    self.notify,
+                    f"Library updated: {new_count} songs searchable (fuzzy)",
+                    severity="information",
+                )
+
         self.library_syncing = False
 
     @work(exclusive=True, thread=True, group="search")

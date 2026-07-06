@@ -34,6 +34,9 @@ class LocalLibrary:
         # Matched-against strings, index-aligned with ``self._tracks``.
         self._choices: list[str] = []
         self.loaded = False
+        # True when the most recent ``load`` was served from the on-disk
+        # cache (i.e. it may be stale and worth revalidating from the server).
+        self.served_from_cache = False
 
     @staticmethod
     def _default_cache_path() -> Path:
@@ -58,6 +61,9 @@ class LocalLibrary:
         if raw is None:
             raw = self._client.fetch_all_songs_raw()
             self._write_disk_cache(raw)
+            self.served_from_cache = False
+        else:
+            self.served_from_cache = True
 
         self._index(raw)
         return len(self._tracks)
