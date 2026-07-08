@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-import io
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import requests
+from PIL import Image as PILImage
 from textual import work
 from textual.widgets import ListItem
 from textual.app import App
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll, HorizontalScroll
 from textual.widgets import Footer, Header, Input, ListView, ProgressBar, Static
-from textual_image.widget import Image
+from textual.worker import Worker, WorkerState
 from rich.text import Text
 
 from src.navidrome.config import NavidromeConfig
@@ -20,12 +20,36 @@ from src.navidrome.client import NavidromeClient
 from src.navidrome.radio import RadioEngine
 from src.search.searcher import NavidromeSearcher
 from src.search.library import LocalLibrary
-from src.navidrome.player import NavidromeStreamVLC
+from src.navidrome.player import NavidromeStreamVLC, PlayerUnavailable
 from src.navidrome.utils import track_signature
 
+from .artwork import SafeImage, fetch_artwork
 from .config_screen import ConfigScreen
 from .keybindings import BINDINGS
 from .visualizer import BeatVisualizer
+
+
+# After this many tracks in a row fail to play, stop rather than spin through
+# the whole library while the server is down.
+MAX_CONSECUTIVE_PLAYBACK_FAILURES = 3
+
+# Worker group -> what to call it when it fails. Groups without an entry are
+# reported under a generic label.
+WORKER_LABELS = {
+    "artwork": "Album art",
+    "library-sync": "Library sync",
+    "like": "Like",
+    "playback": "Playback",
+    "prefetch": "Prefetch",
+    "search": "Search",
+    "shuffle": "Shuffle",
+    "skip": "Skip",
+}
+
+
+def _describe(error: BaseException) -> str:
+    return str(error) or error.__class__.__name__
+
 
 class Tuitify(App):
 
@@ -62,7 +86,62 @@ class Tuitify(App):
         self.prefetched_track: dict[str, Any] | None = None
         self.prefetched_stream_url: str | None = None
         self.visualizer_mode = False
+        self.artwork_failing = False
 
+    # --- Failure containment ---------------------------------------------
+    #
+    # Textual exits the app on *any* unhandled exception — in an action, a
+    # worker, a timer, or a widget's render. Tuitify's inputs are a music
+    # server, a native audio library, and images from the network, none of
+    # which we control. The guards below turn every one of those failures
+    # into a toast so a bad cover or a dropped connection costs a message,
+    # not the session.
+
+    def _log_error(self, message: str) -> None:
+        """Textual's logger writes to a file, so it can raise. It must not."""
+        try:
+            self.log.error(message)
+        except Exception:
+            pass
+
+    def _report(self, context: str, error: BaseException) -> None:
+        """Log a failure and tell the user. Never raises: it's the last line."""
+        message = f"{context}: {_describe(error)}"
+        self._log_error(f"{message} ({error!r})")
+        try:
+            self.notify(message, severity="error")
+        except Exception:  # notifying can fail while the app is tearing down
+            pass
+
+    def _guard(self, callback: Callable[[], None], context: str) -> None:
+        """Run a UI callback, turning any failure into a toast."""
+        try:
+            callback()
+        except Exception as error:
+            self._report(context, error)
+
+    async def run_action(self, *args: Any, **kwargs: Any) -> bool:
+        """Every key binding funnels through here, so guard it in one place."""
+        try:
+            return await super().run_action(*args, **kwargs)
+        except Exception as error:
+            self._report("Action failed", error)
+            return False
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        """Report a crashed background worker instead of exiting.
+
+        Every `@work` in the app sets `exit_on_error=False`, which routes its
+        exception here. That covers `call_from_thread` callbacks too: those
+        run on the event loop but re-raise in the calling worker thread.
+        """
+        if event.state is not WorkerState.ERROR:
+            return
+        error = event.worker.error
+        if error is None:
+            return
+        label = WORKER_LABELS.get(event.worker.group, "Background task")
+        self._report(f"{label} failed", error)
 
     def compose(self):
         yield Header(name="Tuitify", show_clock=True)
@@ -84,7 +163,7 @@ class Tuitify(App):
                     yield Static("Player")
 
                     with Container(id="art-frame", classes="art-frame"):
-                        yield Image(id="album-art")
+                        yield SafeImage(id="album-art")
                         yield BeatVisualizer(
                             position_provider=self._visualizer_position,
                             bpm_provider=self._visualizer_bpm,
@@ -96,6 +175,7 @@ class Tuitify(App):
                     yield Static("Artist", id="artist")
                     yield Static("[b #56B6C6]L[/] ♡ Like", id="like")
                     yield Static("[b #56B6C6]R[/] Loop", id="loop")
+                    yield Static("[b #56B6C6]V[/] Visualizer", id="visualizer-toggle")
                     # Hide Textual's built-in ETA: it guesses time-remaining
                     # from the update rate (jumpy, often "--:--"). We render our
                     # own countdown from the real position + track duration.
@@ -117,7 +197,7 @@ class Tuitify(App):
     def on_mount(self) -> None:
         self._initialize_themes()
         self._restore_theme()
-        self.set_interval(0.25, self._refresh_player_progress)
+        self.set_interval(0.25, self._tick)
 
         if self.config.is_complete:
             self._init_services(self.config)
@@ -125,16 +205,33 @@ class Tuitify(App):
         else:
             self._open_config()
 
+    def _tick(self) -> None:
+        """Progress-bar timer. Runs 4x a second, so it logs instead of toasting."""
+        try:
+            self._refresh_player_progress()
+        except Exception as error:
+            self._log_error(f"Progress refresh failed: {error!r}")
+
     def _init_services(self, config: NavidromeConfig) -> None:
         self.config = config
         self.client = NavidromeClient(config, default_results=20)
         self.searcher = NavidromeSearcher(self.client)
         self.library = LocalLibrary(self.client)
-        self.player = NavidromeStreamVLC(self.client)
+        self.player = self._create_player(self.client)
         self.radio = RadioEngine(self.client)
         # Build the fuzzy index in the background (disk cache first, then a
         # network fetch if needed) so search is instant once it's ready.
         self._sync_library()
+
+    def _create_player(self, client: NavidromeClient) -> NavidromeStreamVLC | None:
+        """Audio is optional: without libVLC you can still browse and search."""
+        try:
+            return NavidromeStreamVLC(client)
+        except PlayerUnavailable as error:
+            self.notify(
+                f"Playback disabled: {error}", severity="error", timeout=15
+            )
+            return None
 
     def _open_config(self) -> None:
         allow_cancel = self.client is not None
@@ -168,7 +265,7 @@ class Tuitify(App):
         self.exit()
 
     def action_toggle_pause(self) -> None:
-        if not self.current_track:
+        if not self.player or not self.current_track:
             return
         self.player.toggle_pause()
 
@@ -193,7 +290,7 @@ class Tuitify(App):
         )
         self._toggle_like(track, currently_liked)
 
-    @work(thread=True, group="like")
+    @work(thread=True, group="like", exit_on_error=False)
     def _toggle_like(self, track: dict[str, Any], was_liked: bool) -> None:
         song_id = track.get("id")
         if not song_id:
@@ -248,8 +345,18 @@ class Tuitify(App):
         frame = self.query_one("#art-frame")
         frame.set_class(self.visualizer_mode, "show-visualizer")
         self.query_one("#visualizer", BeatVisualizer).set_active(self.visualizer_mode)
+        self._update_visualizer_ui()
         mode = "Visualizer" if self.visualizer_mode else "Album cover"
         self.notify(f"Art mode: {mode}", severity="information")
+
+    def _update_visualizer_ui(self) -> None:
+        widget = self.query_one("#visualizer-toggle", Static)
+        widget.update(
+            "[b #56B6C6]V[/] 📊 Visualizer on"
+            if self.visualizer_mode
+            else "[b #56B6C6]V[/] Visualizer"
+        )
+        widget.set_class(self.visualizer_mode, "active")
 
     # --- Visualizer data providers -------------------------------------
 
@@ -275,18 +382,28 @@ class Tuitify(App):
         return [c for c in colors if c]
 
     def action_next_track(self) -> None:
-        if not self.current_track:
+        if not self.radio or not self.current_track:
             return
 
         self.radio.mark_played(self.current_track)
         next_track = self._pop_recommendation()
-        if not next_track:
-            next_track = self._fallback_next(seed=self.current_track)
-            if not next_track:
-                self.notify("No next recommendation ready.", severity="warning")
-                return
+        if next_track:
+            self.start_playback(next_track)
+            return
 
-        self.start_playback(next_track)
+        # Nothing queued yet: the fallback talks to the server, so hand it to a
+        # worker rather than freezing the UI on a slow (or dead) connection.
+        self._skip_to_fallback(self.current_track)
+
+    @work(exclusive=True, thread=True, group="skip", exit_on_error=False)
+    def _skip_to_fallback(self, seed: dict[str, Any]) -> None:
+        next_track = self._fallback_next(seed=seed)
+        if not next_track:
+            self.call_from_thread(
+                self.notify, "No next recommendation ready.", severity="warning"
+            )
+            return
+        self.call_from_thread(self.start_playback, next_track)
 
     def action_previous_track(self) -> None:
         if not self.player or not self.current_track:
@@ -296,7 +413,7 @@ class Tuitify(App):
         # while, restart it; only jump back to the last song when the current
         # one was skipped near the start.
         if self.player.current_time_ms() > 5000:
-            self.player.player.set_time(0)
+            self.player.restart()
             self._flash("Restarting track")
             return
 
@@ -319,7 +436,7 @@ class Tuitify(App):
         self.notify("Shuffling your whole library...", severity="information")
         self._start_shuffle()
 
-    @work(exclusive=True, thread=True, group="shuffle")
+    @work(exclusive=True, thread=True, group="shuffle", exit_on_error=False)
     def _start_shuffle(self) -> None:
         first_track = self.radio.random_next()
         if not first_track:
@@ -340,7 +457,7 @@ class Tuitify(App):
         self.notify("Shuffling your liked songs...", severity="information")
         self._start_liked_shuffle()
 
-    @work(exclusive=True, thread=True, group="shuffle")
+    @work(exclusive=True, thread=True, group="shuffle", exit_on_error=False)
     def _start_liked_shuffle(self) -> None:
         try:
             pool = self.radio.load_liked_pool()
@@ -452,8 +569,9 @@ class Tuitify(App):
 
     # Player functions
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        # Message handlers bypass `run_action`, so they guard themselves.
         if event.input.id == "search-input":
-            self.action_search()
+            self._guard(self.action_search, "Search failed")
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id != "search-results":
@@ -467,7 +585,7 @@ class Tuitify(App):
             # Picking a specific track exits shuffle and returns to similar-radio.
             self.shuffle_mode = False
             self.liked_shuffle_mode = False
-            self.start_playback(track)
+            self._guard(lambda: self.start_playback(track), "Could not start playback")
 
     # Search function
     def action_search(self):
@@ -524,64 +642,68 @@ class Tuitify(App):
             return
         self._sync_library(force=True)
 
-    @work(exclusive=True, thread=True, group="library-sync")
+    @work(exclusive=True, thread=True, group="library-sync", exit_on_error=False)
     def _sync_library(self, force: bool = False) -> None:
         if not self.library:
             return
         self.library_syncing = True
-        self.call_from_thread(
-            self._flash,
-            "Resyncing library..." if force else "Loading library...",
-        )
         try:
-            count = self.library.load(force=force)
-        except Exception as error:
             self.call_from_thread(
-                self.notify, f"Library sync failed: {error}", severity="error"
+                self._flash,
+                "Resyncing library..." if force else "Loading library...",
             )
-            self.library_syncing = False
-            return
-        self.call_from_thread(
-            self.notify,
-            f"Library ready: {count} songs searchable (fuzzy)",
-            severity="information",
-        )
-
-        # Stale-while-revalidate: when the initial load came from the on-disk
-        # cache it may be missing songs added on the server since last time.
-        # Refresh from the network in this same thread and rebuild the fuzzy
-        # index so new songs become searchable without a manual resync.
-        if not force and self.library.served_from_cache:
             try:
-                new_count = self.library.load(force=True)
-            except Exception:
-                # A stale-but-usable index beats surfacing a background error.
-                new_count = count
-            if new_count != count:
+                count = self.library.load(force=force)
+            except Exception as error:
                 self.call_from_thread(
-                    self.notify,
-                    f"Library updated: {new_count} songs searchable (fuzzy)",
-                    severity="information",
+                    self.notify, f"Library sync failed: {error}", severity="error"
                 )
+                return
+            self.call_from_thread(
+                self.notify,
+                f"Library ready: {count} songs searchable (fuzzy)",
+                severity="information",
+            )
 
-        self.library_syncing = False
+            # Stale-while-revalidate: when the initial load came from the on-disk
+            # cache it may be missing songs added on the server since last time.
+            # Refresh from the network in this same thread and rebuild the fuzzy
+            # index so new songs become searchable without a manual resync.
+            if not force and self.library.served_from_cache:
+                try:
+                    new_count = self.library.load(force=True)
+                except Exception:
+                    # A stale-but-usable index beats surfacing a background error.
+                    new_count = count
+                if new_count != count:
+                    self.call_from_thread(
+                        self.notify,
+                        f"Library updated: {new_count} songs searchable (fuzzy)",
+                        severity="information",
+                    )
+        finally:
+            # Whatever happened, a later resync must not be blocked by a flag
+            # left stuck on.
+            self.library_syncing = False
 
-    @work(exclusive=True, thread=True, group="search")
+    @work(exclusive=True, thread=True, group="search", exit_on_error=False)
     def _run_search(self, query: str) -> None:
         self.search_in_progress = True
-        self.call_from_thread(self._set_search_loading, True)
-        started_at = time.perf_counter()
         try:
-            results = self.searcher.search_media_details(query)
-        except Exception as error:
-            self.call_from_thread(
-                self.notify, f"Search failed: {error}", severity="error"
-            )
-            results = []
+            self.call_from_thread(self._set_search_loading, True)
+            started_at = time.perf_counter()
+            try:
+                results = self.searcher.search_media_details(query)
+            except Exception as error:
+                self.call_from_thread(
+                    self.notify, f"Search failed: {error}", severity="error"
+                )
+                results = []
 
-        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        self.call_from_thread(self._set_search_results, query, results, elapsed_ms)
-        self.search_in_progress = False
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            self.call_from_thread(self._set_search_results, query, results, elapsed_ms)
+        finally:
+            self.search_in_progress = False
 
     def _set_search_loading(self, is_loading: bool) -> None:
         results_view = self.query_one("#search-results", ListView)
@@ -667,8 +789,14 @@ class Tuitify(App):
             results_view.index = 0
 
     def start_playback(self, track: dict[str, Any]) -> None:
-        if not self.player or not self.radio:
+        if not self.radio:
             self.notify("Configure your Navidrome server first.", severity="warning")
+            return
+        if not self.player:
+            self.notify(
+                "Playback is unavailable: libVLC could not be loaded.",
+                severity="error",
+            )
             return
         if self.current_track and track_signature(self.current_track) != track_signature(track):
             self.radio.mark_played(self.current_track)
@@ -677,10 +805,11 @@ class Tuitify(App):
         self.player.stop()
         self._playback_session(nonce, track)
 
-    @work(exclusive=True, thread=True, group="playback")
+    @work(exclusive=True, thread=True, group="playback", exit_on_error=False)
     def _playback_session(self, nonce: int, track: dict[str, Any]) -> None:
         current_track = track
         replaying = False
+        consecutive_failures = 0
 
         while nonce == self.playback_nonce:
             if not replaying:
@@ -712,6 +841,23 @@ class Tuitify(App):
                     on_near_end=on_near_end,
                 )
             except Exception as error:
+                consecutive_failures += 1
+                title = current_track.get("title") or "this track"
+                self.call_from_thread(
+                    self.notify,
+                    f"Skipping “{title}”: {_describe(error)}",
+                    severity="warning",
+                )
+                # A dead server would otherwise make us race through the whole
+                # library, one failed track at a time.
+                if consecutive_failures >= MAX_CONSECUTIVE_PLAYBACK_FAILURES:
+                    self.call_from_thread(
+                        self.notify,
+                        "Playback stopped after repeated failures.",
+                        severity="error",
+                    )
+                    return
+
                 next_track = self._pop_recommendation()
                 if not next_track:
                     next_track = self._fallback_next(seed=current_track)
@@ -721,6 +867,8 @@ class Tuitify(App):
 
                 current_track = next_track
                 continue
+
+            consecutive_failures = 0
 
             if nonce != self.playback_nonce:
                 return
@@ -763,7 +911,7 @@ class Tuitify(App):
 
         self.query_one("#title", Static).update(str(track.get("title", "Unknown title")))
         self.query_one("#artist", Static).update(str(track.get("artist_name") or "-"))
-        vol = self.player.get_volume()
+        vol = self.player.get_volume() if self.player else 0
         if track.get("duration"):
             total_time = str(track.get("total_play_time") or "0:00")
             self.query_one("#time", Static).update(
@@ -780,21 +928,25 @@ class Tuitify(App):
         if thumbnail_url:
             self._load_artwork(str(thumbnail_url))
 
-    @work(exclusive=True, thread=True, group="artwork")
+    @work(exclusive=True, thread=True, group="artwork", exit_on_error=False)
     def _load_artwork(self, image_url: str) -> None:
-        try:
-            response = requests.get(image_url, timeout=10)
-            response.raise_for_status()
-            image_data = io.BytesIO(response.content)
-        except Exception:
-            image_data = None
+        # `fetch_artwork` fully decodes here, on the worker thread. Handing the
+        # UI raw bytes would defer the decode to `Image.render()`, where a
+        # truncated download becomes an unhandled exception on the event loop.
+        self.call_from_thread(self._apply_artwork, fetch_artwork(image_url))
 
-        self.call_from_thread(self._set_artwork, image_data)
+    def _apply_artwork(self, image: PILImage.Image | None) -> None:
+        self._set_artwork(image)
+        if image is None and not self.artwork_failing:
+            # Warn once per streak: a broken art endpoint shouldn't toast on
+            # every track change for the rest of the session.
+            self.notify("Cover art could not be loaded.", severity="warning")
+        self.artwork_failing = image is None
 
-    def _set_artwork(self, image_data: io.BytesIO | None) -> None:
-        self.query_one("#album-art", Image).image = image_data
+    def _set_artwork(self, image: PILImage.Image | None) -> None:
+        self.query_one("#album-art", SafeImage).image = image
 
-    @work(exclusive=True, thread=True, group="prefetch")
+    @work(exclusive=True, thread=True, group="prefetch", exit_on_error=False)
     def _start_prefetch_next_track(self) -> None:
         if not self.player or not self.radio:
             return
@@ -883,7 +1035,7 @@ class Tuitify(App):
         next_up_widget.update(f"Next Up: {next_title} | {next_artist}")
 
     def _refresh_player_progress(self) -> None:
-        if not self.current_track:
+        if not self.player or not self.current_track:
             return
 
         elapsed_ms = self.player.current_time_ms()
@@ -905,19 +1057,9 @@ class Tuitify(App):
         )
 
     def _seek_relative_ms(self, delta_ms: int) -> None:
-        if not self.current_track:
+        if not self.player or not self.current_track:
             return
-
-        try:
-            current_ms = self.player.current_time_ms()
-            length_ms = self.player.total_length_ms()
-            target_ms = max(current_ms + int(delta_ms), 0)
-            if length_ms > 0:
-                target_ms = min(target_ms, length_ms - 250)
-            # python-vlc: MediaPlayer.set_time expects milliseconds.
-            self.player.player.set_time(target_ms)
-        except Exception:
-            return
+        self.player.seek_relative_ms(delta_ms)
 
     @staticmethod
     def _safe_get(items: list[dict[str, Any]], index: int) -> dict[str, Any] | None:

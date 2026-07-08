@@ -28,15 +28,21 @@ def track_signature(track: dict[str, Any]) -> str:
 
 
 def clean_tracks(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop tracks without an id/title and deduplicate by id and signature."""
+    """Drop unusable tracks and deduplicate by id and signature.
+
+    A track needs an id, a title, and a stream url to be playable; anything
+    else the server hands us is dropped here rather than blowing up later.
+    """
     seen_ids: set[str] = set()
     seen_signatures: set[str] = set()
     cleaned: list[dict[str, Any]] = []
 
     for track in tracks:
+        if not isinstance(track, dict):
+            continue
         track_id = track.get("id")
         title = str(track.get("title", ""))
-        if not track_id or not title:
+        if not track_id or not title or not track.get("url"):
             continue
 
         signature = track_signature(track)

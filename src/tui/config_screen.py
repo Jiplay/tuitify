@@ -5,6 +5,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static
+from textual.worker import Worker, WorkerState
 
 from src.navidrome.client import NavidromeClient
 from src.navidrome.config import NavidromeConfig
@@ -72,7 +73,7 @@ class ConfigScreen(ModalScreen[NavidromeConfig]):
         self._set_connecting(True)
         self._connect_worker(config)
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, exit_on_error=False)
     def _connect_worker(self, config: NavidromeConfig) -> None:
         try:
             NavidromeClient(config).ping()
@@ -83,8 +84,29 @@ class ConfigScreen(ModalScreen[NavidromeConfig]):
             self.app.call_from_thread(self._set_connecting, False)
             return
 
-        config.save()
+        try:
+            config.save()
+        except OSError as error:
+            # The credentials work; we just can't persist them. Carry on with
+            # this session rather than blocking the user at the login screen.
+            self.app.call_from_thread(
+                self.app.notify,
+                f"Connected, but could not save the config: {error}",
+                severity="warning",
+            )
+
         self.app.call_from_thread(self.dismiss, config)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        """The worker no longer exits the app on error, so surface it here.
+
+        Without this, an unexpected failure would leave the dialog stuck on
+        "Connecting..." with the button disabled.
+        """
+        if event.state is not WorkerState.ERROR or event.worker.error is None:
+            return
+        self._set_status(f"Connection failed: {event.worker.error}", error=True)
+        self._set_connecting(False)
 
     def _set_connecting(self, connecting: bool) -> None:
         self.query_one("#config-connect", Button).disabled = connecting

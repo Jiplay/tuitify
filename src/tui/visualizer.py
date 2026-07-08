@@ -12,6 +12,9 @@ from textual.widget import Widget
 # common tempo in popular music, so a "blind" pulse still lands musically.
 DEFAULT_BPM = 120.0
 
+# Used when the active theme exposes no usable colours.
+FALLBACK_PALETTE = ("#98C379", "#56B6C6", "#E5C07B", "#E06C75")
+
 # Partial vertical blocks let the top of each bar animate at sub-cell
 # resolution, so motion looks smooth instead of stepping a whole row at a time.
 _PARTIAL_BLOCKS = " ▁▂▃▄▅▆▇█"
@@ -76,7 +79,10 @@ class BeatVisualizer(Widget):
 
     def _beat_energy(self) -> float:
         """Shared pulse in [0, 1]: 1.0 at each beat's onset, decaying after."""
-        bpm = self._bpm() or DEFAULT_BPM
+        try:
+            bpm = self._bpm() or DEFAULT_BPM
+        except Exception:
+            bpm = DEFAULT_BPM
         bpm = max(40.0, min(bpm, 220.0))
         beat_period = 60.0 / bpm
         pos_seconds = max(self._position(), 0.0) / 1000.0
@@ -95,6 +101,15 @@ class BeatVisualizer(Widget):
     # --- Rendering -----------------------------------------------------
 
     def render(self) -> Text:
+        # This runs 30x/second on the event loop. The providers reach into the
+        # player and the theme, so a hiccup in either would otherwise take the
+        # app down at frame rate; an empty frame is a fine substitute.
+        try:
+            return self._render_frame()
+        except Exception:
+            return Text()
+
+    def _render_frame(self) -> Text:
         width = self.size.width
         height = self.size.height
         if width <= 0 or height <= 0:
@@ -146,11 +161,25 @@ class BeatVisualizer(Widget):
 
     def _gradient(self, height: int) -> list[str]:
         """A hex colour per vertical cell (index 0 = bottom), from the theme."""
-        colors = self._palette() or ["#98C379", "#56B6C6", "#E5C07B", "#E06C75"]
-        stops = [Color.parse(c) for c in colors]
+        stops = self._stops()
         if len(stops) == 1:
             stops = stops * 2
         gradient = Gradient.from_colors(*stops)
         if height <= 1:
             return [gradient.get_color(1.0).hex]
         return [gradient.get_color(cell / (height - 1)).hex for cell in range(height)]
+
+    def _stops(self) -> list[Color]:
+        """Theme colours as parsed stops, skipping any the theme got wrong."""
+        try:
+            colors = self._palette() or []
+        except Exception:
+            colors = []
+
+        stops: list[Color] = []
+        for color in colors:
+            try:
+                stops.append(Color.parse(color))
+            except Exception:
+                continue
+        return stops or [Color.parse(c) for c in FALLBACK_PALETTE]

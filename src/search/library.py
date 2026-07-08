@@ -15,6 +15,27 @@ CACHE_VERSION = 1
 # Below this score a match is more noise than signal (empirically tuned on a
 # real ~4.5k library with typo'd queries).
 DEFAULT_SCORE_CUTOFF = 60
+# Queries shorter than this skip the substring booster: a 2-3 char fragment
+# is a substring of half the library and would drown real matches in noise.
+_PARTIAL_MIN_LEN = 4
+
+
+def _match_score(query: str, choice: str, **_: Any) -> float:
+    """Fuzzy score blending whole-string and substring matching.
+
+    ``token_set_ratio`` is strong for multi-word and typo'd queries but
+    punishes a short fragment buried in a longer string (e.g. "shatta"
+    against "shattaland xavier picardo" scores ~39). ``partial_ratio``
+    covers exactly that prefix/substring case, so we take the better of the
+    two — gated by length so tiny fragments don't match everything.
+
+    ``process.extract`` passes strings already lowercased/stripped by its
+    ``processor``, so casing is handled upstream; this only affects ranking.
+    """
+    score = fuzz.token_set_ratio(query, choice)
+    if len(query) >= _PARTIAL_MIN_LEN:
+        score = max(score, fuzz.partial_ratio(query, choice))
+    return score
 
 
 class LocalLibrary:
@@ -70,7 +91,13 @@ class LocalLibrary:
 
     def _index(self, raw_songs: list[dict[str, Any]]) -> None:
         # Rebuild fresh (session-scoped) URLs by re-mapping every raw dict.
-        self._tracks = [self._client.to_track(song) for song in raw_songs]
+        # A stale cache file can hold anything, so skip entries that aren't
+        # song objects instead of failing the whole index.
+        self._tracks = [
+            self._client.to_track(song)
+            for song in raw_songs
+            if isinstance(song, dict)
+        ]
         self._choices = [
             f"{track.get('title', '')} {track.get('artist_name', '')}"
             for track in self._tracks
@@ -85,17 +112,24 @@ class LocalLibrary:
         limit: int = 30,
         score_cutoff: int = DEFAULT_SCORE_CUTOFF,
     ) -> list[dict[str, Any]]:
-        """Return the best fuzzy matches for ``query``, most relevant first."""
+        """Return the best fuzzy matches for ``query``, most relevant first.
+
+        Never raises: a search that blows up should degrade to "no results",
+        not take down the app mid-keystroke.
+        """
         if not self._tracks or not query.strip():
             return []
-        matches = process.extract(
-            query,
-            self._choices,
-            scorer=fuzz.token_set_ratio,
-            processor=utils.default_process,
-            limit=limit,
-            score_cutoff=score_cutoff,
-        )
+        try:
+            matches = process.extract(
+                query,
+                self._choices,
+                scorer=_match_score,
+                processor=utils.default_process,
+                limit=limit,
+                score_cutoff=score_cutoff,
+            )
+        except Exception:
+            return []
         return [self._tracks[index] for _, _, index in matches]
 
     # --- Disk cache ----------------------------------------------------
@@ -118,9 +152,16 @@ class LocalLibrary:
             "fetched_at": time.time(),
             "songs": raw_songs,
         }
+        # Write-then-rename: a crash (or a full disk) mid-write leaves the
+        # previous good cache in place rather than a truncated JSON file.
+        temp_path = self._cache_path.with_suffix(".json.tmp")
         try:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cache_path.write_text(json.dumps(payload), encoding="utf-8")
-        except OSError:
+            temp_path.write_text(json.dumps(payload), encoding="utf-8")
+            temp_path.replace(self._cache_path)
+        except (OSError, TypeError, ValueError):
             # A missing cache only costs a re-fetch next time; never fatal.
-            pass
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass

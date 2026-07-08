@@ -6,10 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-CONFIG_DIR = Path(
-    os.environ.get("TUITIFY_CONFIG_DIR") or (Path.home() / ".config" / "tuitify")
-)
-CONFIG_PATH = CONFIG_DIR / "config.json"
+def config_dir() -> Path:
+    """Resolved per call, so `TUITIFY_CONFIG_DIR` works after import."""
+    return Path(
+        os.environ.get("TUITIFY_CONFIG_DIR") or (Path.home() / ".config" / "tuitify")
+    )
+
+
+def config_path() -> Path:
+    return config_dir() / "config.json"
 
 
 @dataclass
@@ -30,12 +35,17 @@ class NavidromeConfig:
 
     @classmethod
     def load(cls) -> "NavidromeConfig":
-        """Load config from the config file, with environment overrides."""
+        """Load config from the config file, with environment overrides.
+
+        A missing or corrupt file is not an error: the app falls back to the
+        setup screen rather than refusing to start.
+        """
         config = cls()
 
-        if CONFIG_PATH.exists():
+        path = config_path()
+        if path.exists():
             try:
-                data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 data = {}
             if isinstance(data, dict):
@@ -50,8 +60,9 @@ class NavidromeConfig:
         return config
 
     def save(self) -> None:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(
+        """Persist the config. Raises `OSError` if the disk says no."""
+        config_dir().mkdir(parents=True, exist_ok=True)
+        config_path().write_text(
             json.dumps(
                 {
                     "url": self.base_url,

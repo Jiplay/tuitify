@@ -3,12 +3,18 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from .client import NavidromeClient
+from .client import NavidromeClient, NavidromeError
 from .utils import clean_tracks, normalize_title, track_signature
 
 
 class RadioEngine:
-    """Manages the playback queue and similar-song based continuation."""
+    """Manages the playback queue and similar-song based continuation.
+
+    Every method returns an empty result rather than raising when the server
+    can't be reached, so a network blip stops the radio instead of the app.
+    The one exception is `load_liked_pool`, which the UI calls directly and
+    reports on.
+    """
 
     def __init__(
         self,
@@ -144,7 +150,12 @@ class RadioEngine:
 
     def _fetch_liked(self, count: int) -> list[dict[str, Any]]:
         if not self.liked_pool:
-            self.load_liked_pool()
+            # Autoplay path: a server hiccup here should stop the queue, not
+            # the app. `load_liked_pool` still raises for explicit user actions.
+            try:
+                self.load_liked_pool()
+            except NavidromeError:
+                return []
 
         candidates = list(self.liked_pool)
         random.shuffle(candidates)
