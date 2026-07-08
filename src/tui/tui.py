@@ -10,6 +10,7 @@ from PIL import Image as PILImage
 from textual import work
 from textual.widgets import ListItem
 from textual.app import App
+from textual.notifications import Notify
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll, HorizontalScroll
 from textual.widgets import Footer, Header, Input, ListView, ProgressBar, Static
 from textual.worker import Worker, WorkerState
@@ -414,7 +415,7 @@ class Tuitify(App):
         # one was skipped near the start.
         if self.player.current_time_ms() > 5000:
             self.player.restart()
-            self._flash("Restarting track")
+            self.notify("Restarting track")
             return
 
         if not self.history:
@@ -502,7 +503,7 @@ class Tuitify(App):
             return
         current_volume = self.player.get_volume()
         new_volume = self.player.set_volume(current_volume + 5)
-        self._flash(f"Volume: {new_volume}%")
+        self.notify(f"Volume: {new_volume}%")
         self._refresh_player_progress()
 
     def action_volume_down(self) -> None:
@@ -510,17 +511,26 @@ class Tuitify(App):
             return
         current_volume = self.player.get_volume()
         new_volume = self.player.set_volume(current_volume - 5)
-        self._flash(f"Volume: {new_volume}%")
+        self.notify(f"Volume: {new_volume}%")
         self._refresh_player_progress()
 
-    def _flash(self, message: str, severity: str = "information") -> None:
-        """Show a toast that replaces any currently visible one.
+    def _on_notify(self, event: Notify) -> None:
+        """Keep only the newest toast on screen.
 
-        Used for rapidly repeated actions (e.g. volume) so a burst of presses
-        leaves a single up-to-date toast instead of a stack.
+        Toasts stack by default, so a burst of actions (a held volume key, a
+        sync that reports progress) buries the UI under a column of them. Only
+        the most recent one is ever worth reading, so clear the rest.
+
+        This has to happen here rather than in `notify()`: `notify()` only
+        *posts* a Notify message, so clearing there drops the toasts already on
+        screen while the ones queued behind it still land and stack. By the
+        time this handler runs, the toast is actually being added.
+
+        Clearing is the whole job — Textual dispatches a handler for every class
+        in the MRO, so `App._on_notify` runs straight after this one and does
+        the add.
         """
-        self.clear_notifications()
-        self.notify(message, severity=severity)
+        self._notifications.clear()
 
     def action_cycle_theme(self) -> None:
         if not self.theme_names:
@@ -537,7 +547,7 @@ class Tuitify(App):
         next_theme = self.theme_names[next_index]
         self.theme = next_theme
         self._save_theme(next_theme)
-        self._flash(f"Theme: {next_theme}")
+        self.notify(f"Theme: {next_theme}")
 
     def action_cursor_up(self) -> None:
         if self.query_one("#search-input", Input).has_focus:
@@ -649,7 +659,7 @@ class Tuitify(App):
         self.library_syncing = True
         try:
             self.call_from_thread(
-                self._flash,
+                self.notify,
                 "Resyncing library..." if force else "Loading library...",
             )
             try:

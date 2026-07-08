@@ -290,6 +290,57 @@ async def test_worker_failures_are_reported_not_fatal():
         assert app.is_running
 
 
+# --- Toasts ------------------------------------------------------------------
+#
+# Only the newest toast should ever be on screen. This leans on Textual
+# dispatching `_on_notify` for every class in the MRO — ours clears, then
+# `App`'s adds. If an upgrade changes that, these fail rather than silently
+# swallowing every toast (or stacking them again).
+
+
+async def test_a_burst_of_toasts_leaves_only_the_newest():
+    """A held volume key posts several toasts before any of them is added."""
+    app = Tuitify()
+    async with app.run_test() as pilot:
+        for level in range(5):
+            app.notify(f"Volume: {level}%")
+        await pilot.pause()
+
+        assert [n.message for n in app._notifications] == ["Volume: 4%"]
+
+
+async def test_toasts_posted_across_separate_turns_still_replace():
+    app = Tuitify()
+    async with app.run_test() as pilot:
+        app.notify("first")
+        await pilot.pause()
+        app.notify("second")
+        await pilot.pause()
+
+        assert [n.message for n in app._notifications] == ["second"]
+
+
+async def test_a_single_toast_is_still_shown_exactly_once():
+    """Guards both regressions: clearing too much, and adding twice."""
+    app = Tuitify()
+    async with app.run_test() as pilot:
+        app.notify("hello")
+        await pilot.pause()
+
+        assert [n.message for n in app._notifications] == ["hello"]
+
+
+async def test_toast_severity_and_title_survive_the_override():
+    app = Tuitify()
+    async with app.run_test() as pilot:
+        app.notify("boom", title="Playback", severity="error", timeout=10)
+        await pilot.pause()
+
+        (toast,) = list(app._notifications)
+        assert (toast.message, toast.title) == ("boom", "Playback")
+        assert (toast.severity, toast.timeout) == ("error", 10)
+
+
 # --- The invariant that makes the above hold --------------------------------
 
 
