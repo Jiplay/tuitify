@@ -12,6 +12,7 @@ from textual.widgets import ListItem
 from textual.app import App
 from textual.notifications import Notify
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll, HorizontalScroll
+from textual.css.query import NoMatches
 from textual.widgets import Footer, Header, Input, ListView, ProgressBar, Static
 from textual.worker import Worker, WorkerState
 from rich.text import Text
@@ -198,6 +199,8 @@ class Tuitify(App):
     def on_mount(self) -> None:
         self._initialize_themes()
         self._restore_theme()
+        # The app_focus watcher doesn't fire before compose, so seed it here.
+        self._sync_app_focus_border()
         self.set_interval(0.25, self._tick)
 
         if self.config.is_complete:
@@ -205,6 +208,21 @@ class Tuitify(App):
             self.action_focus_input()
         else:
             self._open_config()
+
+    def watch_app_focus(self, app_focus: bool) -> None:
+        self._sync_app_focus_border()
+
+    def _sync_app_focus_border(self) -> None:
+        """Tint the player frame while this terminal tab has keyboard focus.
+
+        Terminals that don't report focus leave `app_focus` stuck at True, which
+        degrades to the border simply always being lit.
+        """
+        try:
+            panel = self.query_one("#player-panel")
+        except NoMatches:
+            return
+        panel.set_class(self.app_focus, "app-focused")
 
     def _tick(self) -> None:
         """Progress-bar timer. Runs 4x a second, so it logs instead of toasting."""

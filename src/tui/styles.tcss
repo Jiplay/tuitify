@@ -26,6 +26,11 @@ Screen {
         width: 3fr;
     }
 
+    /* Lit while this terminal tab holds focus, so keys are known to land here. */
+    #player-panel.app-focused {
+        border: round $primary;
+    }
+
     /* Compact "player only" view: hide search panel and window chrome. */
     .player-only #search-panel {
         display: none;
